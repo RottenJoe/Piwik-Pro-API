@@ -35,11 +35,24 @@ endpoints <- list(
   auth = '/auth/token'
 )
 
-##Pagination Variables
+##Pagination variables
 offset <- 0
 limit <- 10000
 
-#Helper Functions
+##Create dictionary for column renaming
+nested_cols <- list(
+  website_name = c('app_id', 'app_name'),
+  operating_system = c('os_code', 'os_name'),
+  browser_name = c('browser_code', 'browser_name'),
+  browser_language_iso639 = c('browser_lang_code', 'browser_lang'),
+  device_brand = c('device_brand_code', 'device_brand'),
+  location_continent_iso_code = c('location_continent_code', 'location_continent_name'),
+  location_country_name = c('location_country_code', 'location_country_name'),
+  location_subdivision_1_name = c('location_subdivision_code', 'location_subdivision_name'),
+  location_city_name = c('location_city_code', 'location_city_name')
+)
+
+#Helper functions
 
 ##Authentication
 auth_token <- function () {
@@ -56,7 +69,7 @@ auth_token <- function () {
   
 }
 
-##Column List
+##Column list
 col_list <- function(input) {
   return_list <- list('column_id' = input[['column']])
   if (input[['transformation']] != '') {
@@ -65,18 +78,16 @@ col_list <- function(input) {
   return(return_list)
 }
 
-##Unlist and replace NULL
-unlist_and_replace_null <- function(list) {
-  unlist(purrr::map(list, ~if(is.null(.x)) {NA} else {.x}))
+##Replace NULL in list-columns
+replace_null <- function(x) {
+  if (is.list(x)) {
+    return(map(x, replace_null))  # Recursively apply to each list element
+  } else {
+    return(ifelse(is.null(x), NA, x))  # Replace NULL with NA (or any value)
+  }
 }
 
-unlist_and_replace_null_2 <- function(list) {
-  unlisted <- result_new %>%
-    mutate(website_name = map(website_name, ~ replace(., is.null(.), NA))) %>% 
-    unnest(c(website_name))
-}
-
-#Define Columns & Filters
+#Define columns & filters
 queries <- list(
   test_query = list(
     cols = tribble(
@@ -89,6 +100,7 @@ queries <- list(
       'browser_language_iso639', '',
       'device_type', '', 
       'device_brand', '',
+      'source_medium', '',
       'location_continent_iso_code', '',
       'location_country_name', '',
       'location_subdivision_1_name', '',
@@ -120,16 +132,16 @@ queries <- list(
   )
 )
 
-#Run Queries
+#Run queries
 for (i in names(queries)) {
   print(i)
   print(queries[[i]]$cols)
   
-  #Define Cols and Filters
+  #Define cols and filters
   assign(paste(i, '_cols', sep = ''), apply(queries[[i]]$cols, 1, col_list))
   assign(paste(i, '_filter', sep = ''), queries[[i]]$filter)
   
-  #Generate Query
+  #Generate query
   query <- list('date_from' = start_date,
                 'date_to' = end_date,
                 'website_id' = pp_id,
@@ -141,20 +153,20 @@ for (i in names(queries)) {
                 #'metric_filters' = NULL
   )
   
-  #Set Query Endpoint
+  #Set query endpoint
   query_req <- request(paste0(domain, endpoints$query))
   
-  #Set Query Error
+  #Set query error
   error_body <- function(query_resp) {
     resp_body_json(query_resp)$error
   }
   
-  #Execute Query
+  #Execute query
   
-  ##Generate Auth Token
+  ##Generate auth token
   auth_token()
   
-  ##Reset While Variables
+  ##Reset while variables
   run <- TRUE
   if (exists('result') == TRUE) {
     rm(result)
@@ -177,7 +189,7 @@ for (i in names(queries)) {
       
       run <- TRUE
       
-      ###Extract List from Response
+      ###Extract list from response
       
       data <- data_json[['data']]
       cols <- data_json[['meta']][['columns']]
@@ -206,38 +218,38 @@ for (i in names(queries)) {
     
   }
   
-  #All columns are lists until here
+  #Convert to dataframe
+  result <- as.data.frame(result)
   
-  result1 <- result
+  #Replace all NULL values with NA
+  result <- result %>%
+    mutate(across(everything(), replace_null))
   
-  #Either unnest_wider with 'sep = ' and rename columns
-  #Or for loop with renaming
-  #Narrow down columns for which for list items need to be kept 
-  
-  for (col in names(col)) {
-    if (length(result1[[col]][[1]]) == 1) {
-      mutate(col = map(col, ~ replace(., is.null(.), NA)))
-    }
-    for (item in length(result1[[col]][[1]])) {
-      
-    }
-  }
-  
-  #Flatten Nested Cols
-  for (col in names(result1)) {
-    if (length(result1[[col]][[1]]) > 1) {
-      result1[[col]] <- sapply(result1[[col]], '[[', 2)
+  #Unnest columns
+  for (col in names(result)) {
+    #Unnest list-columns
+    if (length(result[[col]][[1]]) > 1) { 
+      #If column names are specified in nested_col, apply naming and extract both values
+      if (col %in% names(nested_cols)) {
+        for (item in seq_along(1:length(result[[col]][[1]]))) {
+          col_name <- nested_cols[[col]][item]
+          result[[col_name]] <- sapply(result[[col]], '[[', item)
+          result <- result %>% relocate(all_of(col_name), .after = all_of(col))
+        }
+      } else {
+        #If column names are not specified, use existing name and extract second value
+        result[[col]] <- sapply(result[[col]], '[[', 2)
+      }
     } else {
-      next
+      #Unlist non-list-columns
+      result[[col]] <- unlist(result[[col]])
     }
   }
   
-  result_new <- result1
+  #Select only flat columns
+  df <- df %>% select(!where(is.list))
   
-  #Unlist & DF (Unlist needed because function above only unlists for lists with > 1 items)
-  df <- as.data.frame(sapply(result_new, unlist_and_replace_null))
-  
-  #Google Ads Campaign Names
+  #Google Ads campaign names
   if ('google_ads_campaign_name' %in% names(df)) {
     df <- df %>%
       mutate(
@@ -248,7 +260,7 @@ for (i in names(queries)) {
       )
   }
   
-  #Teads Campaigns from Query Parameter event_url
+  #Teads campaigns from query parameter event_url
   if ('event_url' %in% names(df)) {
     df <- df %>% 
       mutate(
@@ -259,7 +271,7 @@ for (i in names(queries)) {
       )
   }
   
-  #Teads Campaigns from Query Parameter session_entry_url
+  #Teads campaigns from query parameter session_entry_url
   if ('session_entry_url' %in% names(df)) {
     df <- df %>% 
       mutate(
@@ -279,7 +291,7 @@ for (i in names(queries)) {
       )
   }
   
-  #Query Parameter
+  #Query parameter
   if ('event_url' %in% names(df)) {
     df <- df %>%
       mutate(
@@ -300,19 +312,20 @@ for (i in names(queries)) {
       )
   }
   
-  #String Replace
+  #String replace
   df <- df %>%
     mutate(across(!where(~is.numeric(.x)), .fns = ~str_replace_all(.x, 'www.|wwt.', ''))) %>%
     mutate(across(!where(~is.numeric(.x)), .fns = ~str_split_i(.x, '\\?', 1))) %>%
     mutate(across(!where(~is.numeric(.x)), .fns = ~replace_na(.x, '')))
   
-  #Value Formatting
+  #Value formatting
   df <- df %>%
     mutate(across(contains('date'), .fns = ~as.Date(.x, format = '%Y-%m-%d'))) %>%
-    mutate(across(c(where(~any(str_detect(.x, '^[0-9]+$'))), -contains('campaign_'), -contains('ad_')), .fns = ~as.numeric(.x)))
+    mutate(across(c(where(~any(str_detect(.x, '^[0-9]+$'))), -contains('campaign_'), -contains('ad_'), -contains('_code')), .fns = ~as.numeric(.x))) %>%
+    mutate(across(c(contains('_code')), .fns = ~as.character(.x)))
   
   
-  #Rename Columns
+  #Rename columns
   rename_cols <- c(
     date = 'timestamp__to_date',
     entry_url = 'session_entry_url',
@@ -323,34 +336,12 @@ for (i in names(queries)) {
   df <- df %>%
     rename(any_of(rename_cols))
   
-  #Drop Columns
+  #Drop columns
   drop_cols <- c('google_ads_campaign_name')
   
   df <- df %>%
     select(!any_of(drop_cols))
   
-  #Name Response
+  #Name response
   assign(i, df)
 }
-
-#To do: Unnesting of List Columns
-
-##Separate
-test <- result %>% separate(unlist(website_name), sep = ',', into = c('website_id', 'website_name'))
-
-##Unnest wider
-result %>% unnest_wider(website_name, names_sep = '_', simplify = TRUE)
-
-##Create dictionary for column renaming
-nested_cols <- list(
-  website_name = c('app_id', 'app_name'),
-  operating_system = c('os_code', 'os_name'),
-  browser_name = c('browser_code', 'browser_name'),
-  browser_language_iso639 = c('browser_lang_code', 'browser_lang'),
-  device_brand = c('device_brand_code', 'device_brand'),
-  location_continent_iso_code = c('location_continent_code', 'location_continent_name'),
-  location_country_name = c('location_country_code', 'location_country_name'),
-  location_subdivision_1_name = c('location_subdivision_code', 'location_subdivision_name'),
-  location_city_name = c('location_city_code', 'location_city_name'),
-  location_metro_code = c('location_metro_code', 'location_metro_name')
-)
